@@ -20,6 +20,7 @@ class ProviderConfig:
 	user_info_path: str = '/api/user/self'
 	api_user_key: str = 'new-api-user'
 	bypass_method: Literal['waf_cookies'] | None = None
+	waf_cookies: list[str] | None = None  # 需要获取的 WAF cookies 列表
 
 	@classmethod
 	def from_dict(cls, name: str, data: dict) -> 'ProviderConfig':
@@ -37,6 +38,7 @@ class ProviderConfig:
 			user_info_path=data.get('user_info_path', '/api/user/self'),
 			api_user_key=data.get('api_user_key', 'new-api-user'),
 			bypass_method=data.get('bypass_method'),
+			waf_cookies=data.get('waf_cookies'),
 		)
 
 	def needs_waf_cookies(self) -> bool:
@@ -66,6 +68,7 @@ class AppConfig:
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
+				waf_cookies=['acw_tc', 'cdn_sec_tc', 'acw_sc__v2'],
 			),
 			'agentrouter': ProviderConfig(
 				name='agentrouter',
@@ -75,6 +78,7 @@ class AppConfig:
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
+				waf_cookies=['acw_tc'],  # AgentRouter 只需要 acw_tc
 			),
 		}
 
