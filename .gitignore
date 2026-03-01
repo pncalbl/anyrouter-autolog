@@ -6,6 +6,7 @@ __pycache__
 .ruff_cache
 balance_hash.txt
 .idea
+*.zip
 
 # User credentials and extracted data
 node_modules
@@ -16,3 +17,4 @@ get_user/anyrouter_accounts.txt
 # Debug files
 get_user/debug_*.html
 get_user/debug_*.png
+
