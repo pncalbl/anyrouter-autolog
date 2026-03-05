@@ -6,7 +6,7 @@
 import json
 import os
 from dataclasses import dataclass
-from typing import Dict, Literal
+from typing import Dict, List, Literal
 
 
 @dataclass
@@ -20,7 +20,23 @@ class ProviderConfig:
 	user_info_path: str = '/api/user/self'
 	api_user_key: str = 'new-api-user'
 	bypass_method: Literal['waf_cookies'] | None = None
-	waf_cookies: list[str] | None = None  # 需要获取的 WAF cookies 列表
+	waf_cookie_names: List[str] | None = None
+
+	def __post_init__(self):
+		required_waf_cookies = set()
+		if self.waf_cookie_names and isinstance(self.waf_cookie_names, List):
+			for item in self.waf_cookie_names:
+				name = '' if not item or not isinstance(item, str) else item.strip()
+				if not name:
+					print(f'[WARNING] Found invalid WAF cookie name: {item}')
+					continue
+
+				required_waf_cookies.add(name)
+
+		if not required_waf_cookies:
+			self.bypass_method = None
+
+		self.waf_cookie_names = list(required_waf_cookies)
 
 	@classmethod
 	def from_dict(cls, name: str, data: dict) -> 'ProviderConfig':
@@ -38,7 +54,7 @@ class ProviderConfig:
 			user_info_path=data.get('user_info_path', '/api/user/self'),
 			api_user_key=data.get('api_user_key', 'new-api-user'),
 			bypass_method=data.get('bypass_method'),
-			waf_cookies=data.get('waf_cookies'),
+			waf_cookie_names=data.get('waf_cookie_names'),
 		)
 
 	def needs_waf_cookies(self) -> bool:
@@ -68,7 +84,7 @@ class AppConfig:
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
-				waf_cookies=['acw_tc', 'cdn_sec_tc', 'acw_sc__v2'],
+				waf_cookie_names=['acw_tc', 'cdn_sec_tc', 'acw_sc__v2'],
 			),
 			'agentrouter': ProviderConfig(
 				name='agentrouter',
@@ -78,7 +94,7 @@ class AppConfig:
 				user_info_path='/api/user/self',
 				api_user_key='new-api-user',
 				bypass_method='waf_cookies',
-				waf_cookies=['acw_tc'],  # AgentRouter 只需要 acw_tc
+				waf_cookie_names=['acw_tc'],
 			),
 		}
 
@@ -111,8 +127,39 @@ class AppConfig:
 		return cls(providers=providers)
 
 	def get_provider(self, name: str) -> ProviderConfig | None:
-		"""获取指定 provider 配置"""
-		return self.providers.get(name)
+		"""获取指定 provider 配置
+
+		支持以下格式匹配:
+		- 精确名称: "anyrouter", "agentrouter"
+		- 域名格式: "anyrouter.top", "agentrouter.org"
+		- 完整URL: "https://anyrouter.top"
+		"""
+		# 1. 精确匹配
+		provider = self.providers.get(name)
+		if provider:
+			return provider
+
+		# 2. 域名/URL 模糊匹配
+		normalized = name.lower().strip()
+		# 移除协议前缀
+		for prefix in ('https://', 'http://'):
+			if normalized.startswith(prefix):
+				normalized = normalized[len(prefix):]
+				break
+		# 移除尾部斜杠
+		normalized = normalized.rstrip('/')
+
+		for provider in self.providers.values():
+			domain = provider.domain.lower()
+			for prefix in ('https://', 'http://'):
+				if domain.startswith(prefix):
+					domain = domain[len(prefix):]
+					break
+			domain = domain.rstrip('/')
+			if domain == normalized:
+				return provider
+
+		return None
 
 
 @dataclass

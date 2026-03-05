@@ -30,7 +30,7 @@ def load_balance_hash():
 		if os.path.exists(BALANCE_HASH_FILE):
 			with open(BALANCE_HASH_FILE, 'r', encoding='utf-8') as f:
 				return f.read().strip()
-	except Exception:
+	except Exception:  # nosec B110
 		pass
 	return None
 
@@ -159,8 +159,7 @@ async def prepare_cookies(account_name: str, provider_config, user_cookies: dict
 
 	if provider_config.needs_waf_cookies():
 		login_url = f'{provider_config.domain}{provider_config.login_path}'
-		required_cookies = provider_config.waf_cookies or ['acw_tc', 'cdn_sec_tc', 'acw_sc__v2']
-		waf_cookies = await get_waf_cookies_with_playwright(account_name, login_url, required_cookies)
+		waf_cookies = await get_waf_cookies_with_playwright(account_name, login_url, provider_config.waf_cookie_names)
 		if not waf_cookies:
 			print(f'❌ [失败] {account_name}: 无法获取 WAF cookies')
 			return None
@@ -190,6 +189,11 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 				return True
 			else:
 				error_msg = result.get('msg', result.get('message', '未知错误'))
+				# 检查是否是"已经签到过"的情况，这种情况也算成功
+				already_checked_keywords = ['已经签到', '已签到', '重复签到', 'already checked', 'already signed']
+				if any(keyword in error_msg.lower() for keyword in already_checked_keywords):
+					print(f'✅ [成功] {account_name}: 今日已签到')
+					return True
 				print(f'❌ [失败] {account_name}: 签到失败 - {error_msg}')
 				return False
 		except json.JSONDecodeError:
@@ -205,6 +209,48 @@ def execute_check_in(client, account_name: str, provider_config, headers: dict):
 		return False
 
 
+def format_check_in_notification(detail: dict) -> str:
+	"""格式化签到通知消息"""
+	lines = [
+		f'[签到] {detail["name"]}',
+		'  ━━━━━━━━━━━━━━━━━━━━',
+		'  📍 签到前',
+		f'     💵 余额: ${detail["before_quota"]:.2f}  |  📊 累计消耗: ${detail["before_used"]:.2f}',
+		'  📍 签到后',
+		f'     💵 余额: ${detail["after_quota"]:.2f}  |  📊 累计消耗: ${detail["after_used"]:.2f}',
+	]
+
+	# 判断是否有变化
+	has_reward = detail['check_in_reward'] != 0
+	has_usage = detail['usage_increase'] != 0
+
+	if has_reward or has_usage:
+		lines.append('  ━━━━━━━━━━━━━━━━━━━━')
+
+		# 已签到但期间有使用
+		if not has_reward and has_usage:
+			lines.append('  ℹ️  今日已签到（期间有使用）')
+
+		# 签到获得
+		if has_reward:
+			lines.append(f'  🎁 签到获得: +${detail["check_in_reward"]:.2f}')
+
+		# 期间消耗
+		if has_usage:
+			lines.append(f'  📉 期间消耗: ${detail["usage_increase"]:.2f}')
+
+		# 余额变化
+		if detail['balance_change'] != 0:
+			change_symbol = '+' if detail['balance_change'] > 0 else ''
+			change_emoji = '📈' if detail['balance_change'] > 0 else '📉'
+			lines.append(f'  {change_emoji} 余额变化: {change_symbol}${detail["balance_change"]:.2f}')
+	else:
+		# 无任何变化
+		lines.extend(['  ━━━━━━━━━━━━━━━━━━━━', '  ℹ️  今日已签到，无变化'])
+
+	return '\n'.join(lines)
+
+
 async def check_in_account(account: AccountConfig, account_index: int, app_config: AppConfig):
 	"""为单个账号执行签到操作"""
 	account_name = account.get_display_name(account_index)
@@ -213,18 +259,18 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 	provider_config = app_config.get_provider(account.provider)
 	if not provider_config:
 		print(f'❌ [失败] {account_name}: 配置中未找到服务商 "{account.provider}"')
-		return False, None
+		return False, None, None
 
 	print(f'ℹ️ [信息] {account_name}: 使用服务商 "{account.provider}" ({provider_config.domain})')
 
 	user_cookies = parse_cookies(account.cookies)
 	if not user_cookies:
 		print(f'❌ [失败] {account_name}: 配置格式无效')
-		return False, None
+		return False, None, None
 
 	all_cookies = await prepare_cookies(account_name, provider_config, user_cookies)
 	if not all_cookies:
-		return False, None
+		return False, None, None
 
 	client = httpx.Client(http2=True, timeout=30.0)
 
@@ -246,22 +292,26 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		}
 
 		user_info_url = f'{provider_config.domain}{provider_config.user_info_path}'
-		user_info = get_user_info(client, headers, user_info_url)
-		if user_info and user_info.get('success'):
-			print(user_info['display'])
-		elif user_info:
-			print(user_info.get('error', '未知错误'))
+		user_info_before = get_user_info(client, headers, user_info_url)
+		if user_info_before and user_info_before.get('success'):
+			print(user_info_before['display'])
+		elif user_info_before:
+			print(user_info_before.get('error', '未知错误'))
 
 		if provider_config.needs_manual_check_in():
 			success = execute_check_in(client, account_name, provider_config, headers)
-			return success, user_info
+			# 签到后再次获取用户信息，用于计算签到收益
+			user_info_after = get_user_info(client, headers, user_info_url)
+			return success, user_info_before, user_info_after
 		else:
 			print(f'ℹ️ [信息] {account_name}: 签到已自动完成（由用户信息请求触发）')
-			return True, user_info
+			# 自动签到的情况，再次获取用户信息
+			user_info_after = get_user_info(client, headers, user_info_url)
+			return True, user_info_before, user_info_after
 
 	except Exception as e:
 		print(f'❌ [失败] {account_name}: 签到过程中发生错误 - {str(e)[:50]}...')
-		return False, None
+		return False, None, None
 	finally:
 		client.close()
 
@@ -287,6 +337,7 @@ async def main():
 	total_count = len(accounts)
 	notification_content = []
 	current_balances = {}
+	account_check_in_details = {}  # 存储每个账号的签到详情
 	# 检查是否设置了总是通知的环境变量（默认为 false，只在余额变化或失败时通知）
 	always_notify_env = os.getenv('ALWAYS_NOTIFY', 'false').lower()
 	always_notify = always_notify_env in ['true', '1', 'yes']
@@ -301,7 +352,7 @@ async def main():
 		account_key = f'account_{i + 1}'
 		account_name = account.get_display_name(i)
 		try:
-			success, user_info = await check_in_account(account, i, app_config)
+			success, user_info_before, user_info_after = await check_in_account(account, i, app_config)
 			if success:
 				success_count += 1
 				success_accounts.append(account_name)
@@ -315,18 +366,51 @@ async def main():
 				need_notify = True
 				print(f'🔔 [通知] {account_name} 失败，将发送通知')
 
-			if user_info and user_info.get('success'):
-				current_quota = user_info['quota']
-				current_used = user_info['used_quota']
+			# 存储签到前后的余额信息
+			if user_info_after and user_info_after.get('success'):
+				current_quota = user_info_after['quota']
+				current_used = user_info_after['used_quota']
 				current_balances[account_key] = {'quota': current_quota, 'used': current_used}
+
+				# 计算签到收益
+				if user_info_before and user_info_before.get('success'):
+					before_quota = user_info_before['quota']
+					before_used = user_info_before['used_quota']
+					after_quota = user_info_after['quota']
+					after_used = user_info_after['used_quota']
+
+					# 计算总额度（余额 + 历史消耗）
+					total_before = before_quota + before_used
+					total_after = after_quota + after_used
+
+					# 签到获得的额度 = 总额度增加量
+					check_in_reward = total_after - total_before
+
+					# 本次消耗 = 历史消耗增加量
+					usage_increase = after_used - before_used
+
+					# 余额变化
+					balance_change = after_quota - before_quota
+
+					account_check_in_details[account_key] = {
+						'name': account.get_display_name(i),
+						'before_quota': before_quota,
+						'before_used': before_used,
+						'after_quota': after_quota,
+						'after_used': after_used,
+						'check_in_reward': check_in_reward,
+						'usage_increase': usage_increase,
+						'balance_change': balance_change,
+						'success': success,
+					}
 
 			if should_notify_this_account:
 				status = '✅ [成功]' if success else '❌ [失败]'
 				account_result = f'{status} {account_name}'
-				if user_info and user_info.get('success'):
-					account_result += f'\n{user_info["display"]}'
-				elif user_info:
-					account_result += f'\n{user_info.get("error", "未知错误")}'
+				if user_info_after and user_info_after.get('success'):
+					account_result += f'\n{user_info_after["display"]}'
+				elif user_info_after:
+					account_result += f'\n{user_info_after.get("error", "未知错误")}'
 				notification_content.append(account_result)
 
 		except Exception as e:
@@ -356,11 +440,13 @@ async def main():
 	if balance_changed or always_notify:
 		for i, account in enumerate(accounts):
 			account_key = f'account_{i + 1}'
-			if account_key in current_balances:
-				account_name = account.get_display_name(i)
-				# 只添加成功获取余额的账号，且避免重复添加
-				account_result = f'💰 [余额] {account_name}'
-				account_result += f'\n💰 已使用: ${current_balances[account_key]["used"]}, 当前余额: 💵${current_balances[account_key]["quota"]}'
+			if account_key in account_check_in_details:
+				detail = account_check_in_details[account_key]
+				account_name = detail['name']
+
+				# 使用格式化函数生成通知消息
+				account_result = format_check_in_notification(detail)
+
 				# 检查是否已经在通知内容中（避免重复）
 				if not any(account_name in item for item in notification_content):
 					notification_content.append(account_result)
